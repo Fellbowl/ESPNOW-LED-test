@@ -1,0 +1,15 @@
+# ESP-IDF build artifacts
+build/
+sdkconfig.old
+*.bin
+*.elf
+*.map
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+
+# Keep sdkconfig so the target (esp32) is reproducible.
+# If you prefer a fully clean repo, uncomment the next line:
+# sdkconfig
