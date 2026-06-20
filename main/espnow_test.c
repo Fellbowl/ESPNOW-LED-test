@@ -16,10 +16,12 @@
 // ---------------------------------------------------------
 // CONFIGURATION
 // Change this to 0 for the Receiver ESP32, and 1 for the Sender
-#define IS_SENDER 0
+#define IS_SENDER 1
 // ---------------------------------------------------------
 
 #define BLINK_GPIO 2 // Default integrated LED on most ESP32 boards
+#define BUTTON_GPIO 0 // On-board BOOT button on most ESP32 boards (active LOW)
+#define DEBOUNCE_MS 30 // Button debounce time
 
 static const char *TAG = "ESPNOW_TEST";
 
@@ -85,27 +87,48 @@ static void espnow_init(void)
     ESP_LOGI(TAG, "Broadcast peer added successfully");
 }
 
-// Task to send messages periodically (Only used by SENDER)
+// Send the current command over ESPNOW and mirror it on the local LED
+static void send_command(espnow_command_t *cmd)
+{
+    ESP_LOGI(TAG, "Button pressed. Sending command: Turn LED %s", cmd->led_state ? "ON" : "OFF");
+    esp_err_t result = esp_now_send(broadcast_mac, (uint8_t *)cmd, sizeof(espnow_command_t));
+
+    if (result == ESP_OK) {
+        // Mirror the transmitted state on the sender's own LED
+        gpio_set_level(BLINK_GPIO, cmd->led_state);
+    } else {
+        ESP_LOGE(TAG, "Error sending command: %d", result);
+    }
+}
+
+// Task that sends a command on every button press (Only used by SENDER)
 static void send_task(void *pvParameter)
 {
     espnow_command_t cmd;
     cmd.led_state = false;
 
+    int last_level = 1; // Not pressed: pull-up keeps the line HIGH
+
     while (1) {
-        // Toggle the state
-        cmd.led_state = !cmd.led_state; 
-        
-        ESP_LOGI(TAG, "Sending command: Turn LED %s", cmd.led_state ? "ON" : "OFF");
-        esp_err_t result = esp_now_send(broadcast_mac, (uint8_t *)&cmd, sizeof(espnow_command_t));
-        
-        if (result == ESP_OK) {
-            // Optional: You could also toggle the sender's own LED to see what it's transmitting
-            gpio_set_level(BLINK_GPIO, cmd.led_state); 
-        } else {
-            ESP_LOGE(TAG, "Error sending command: %d", result);
+        int level = gpio_get_level(BUTTON_GPIO);
+
+        // Detect a falling edge: button just went from released (1) to pressed (0)
+        if (last_level == 1 && level == 0) {
+            vTaskDelay(pdMS_TO_TICKS(DEBOUNCE_MS)); // Debounce
+
+            if (gpio_get_level(BUTTON_GPIO) == 0) { // Still pressed -> valid press
+                cmd.led_state = !cmd.led_state; // Toggle the state
+                send_command(&cmd);
+
+                // Wait for release so one press sends exactly one command
+                while (gpio_get_level(BUTTON_GPIO) == 0) {
+                    vTaskDelay(pdMS_TO_TICKS(10));
+                }
+            }
         }
 
-        vTaskDelay(pdMS_TO_TICKS(2000)); // Delay for 2 seconds
+        last_level = level;
+        vTaskDelay(pdMS_TO_TICKS(10)); // Poll interval
     }
 }
 
@@ -132,7 +155,17 @@ void app_main(void)
 
     // If this board is configured as the sender, start the sending task
     if (IS_SENDER) {
-        ESP_LOGI(TAG, "Starting as SENDER. Toggling LED command every 2 seconds...");
+        // Configure the BOOT button as input with internal pull-up (active LOW)
+        gpio_config_t btn_cfg = {
+            .pin_bit_mask = (1ULL << BUTTON_GPIO),
+            .mode = GPIO_MODE_INPUT,
+            .pull_up_en = GPIO_PULLUP_ENABLE,
+            .pull_down_en = GPIO_PULLDOWN_DISABLE,
+            .intr_type = GPIO_INTR_DISABLE,
+        };
+        ESP_ERROR_CHECK( gpio_config(&btn_cfg) );
+
+        ESP_LOGI(TAG, "Starting as SENDER. Press the button to toggle/send the LED command...");
         xTaskCreate(send_task, "espnow_send_task", 4096, NULL, 4, NULL);
     } else {
         ESP_LOGI(TAG, "Starting as RECEIVER. Waiting for LED commands...");

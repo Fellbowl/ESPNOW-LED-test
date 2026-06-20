@@ -1,6 +1,6 @@
 # ESP-NOW Wireless LED Control
 
-> Two ESP32 boards talking directly over ESP-NOW — no Wi-Fi router, no pairing, no cloud — to control an LED in real time.
+> Press a button on one ESP32 and toggle an LED on another — directly over ESP-NOW, with no Wi-Fi router, no pairing, and no cloud.
 
 ![Platform](https://img.shields.io/badge/Platform-ESP32-E7352C?logo=espressif&logoColor=white)
 ![Framework](https://img.shields.io/badge/Framework-ESP--IDF-000000?logo=espressif&logoColor=white)
@@ -13,7 +13,7 @@
 
 ## Overview
 
-**What it solves:** wireless device-to-device control without any network infrastructure. Most "IoT" demos need a Wi-Fi router, an MQTT broker, or a cloud account just to turn an LED on. This project shows the leaner path: one ESP32 sends a command straight to another using **ESP-NOW**, Espressif's connectionless protocol built on the Wi-Fi radio.
+**What it solves:** wireless device-to-device control without any network infrastructure. Most "IoT" demos need a Wi-Fi router, an MQTT broker, or a cloud account just to turn an LED on. This project shows the leaner path: a physical button press on one ESP32 sends a command straight to another using **ESP-NOW**, Espressif's connectionless protocol built on the Wi-Fi radio.
 
 **Who it's for:** embedded developers and makers who need low-latency, low-overhead links between microcontrollers — the foundation for remote sensors, wireless actuators, or controller/peripheral pairs where standing up a full TCP/IP stack is overkill.
 
@@ -25,7 +25,8 @@
 
 - **Zero-infrastructure wireless link** — boards communicate directly via ESP-NOW broadcast; no access point, no IP addressing, no pairing handshake.
 - **One firmware, two roles** — a single `IS_SENDER` flag flips a board between transmitter and receiver, keeping the codebase unified and easy to maintain.
-- **Real-time actuation** — the sender toggles a command every 2 seconds and the receiver drives its LED on arrival, with a typed payload so malformed packets are rejected by size check.
+- **On-demand actuation from a physical button** — pressing the on-board BOOT button toggles the command and sends it; the receiver drives its LED on arrival, with a typed payload so malformed packets are rejected by size check.
+- **Debounced, one-press-one-command input** — falling-edge detection plus a 30 ms debounce and release-wait guarantee that a single press transmits exactly one command, with no bounce-induced duplicates.
 - **Built-in delivery feedback** — a send callback logs `Delivery Success` / `Delivery Fail` for every packet, giving immediate link-quality visibility over the serial monitor.
 - **Self-verifiable** — the sender mirrors the transmitted state on its own LED, so the transmit path can be confirmed even with a single board on the bench.
 - **FreeRTOS task-based** — transmission runs in its own task, leaving the main thread free for future expansion (sensors, multiple peers, etc.).
@@ -40,7 +41,8 @@ flowchart LR
         A[app_main] --> B[wifi_init<br/>STA mode]
         B --> C[espnow_init<br/>+ broadcast peer]
         C --> D[send_task<br/>FreeRTOS]
-        D -->|toggle led_state<br/>every 2 s| E[esp_now_send]
+        BTN([BOOT button<br/>GPIO0]) -->|press<br/>debounced| D
+        D -->|toggle led_state<br/>on press| E[esp_now_send]
         E --> F[espnow_send_cb<br/>log delivery status]
     end
 
@@ -72,15 +74,17 @@ The payload is a single typed struct broadcast on every transmission. The receiv
 | Destination MAC    | `FF:FF:FF:FF:FF:FF` (broadcast)          |
 | Encryption         | Disabled (`encrypt = false`)             |
 | Channel            | `0` → use current Wi-Fi channel          |
-| Send interval      | 2000 ms                                  |
+| Trigger            | On-board button press (falling edge)     |
+| Debounce           | 30 ms + wait-for-release                  |
 
 ---
 
 ## Pinout
 
-| Signal      | GPIO | Notes                                                   |
-|-------------|------|---------------------------------------------------------|
-| On-board LED | `2` | Default integrated LED on most ESP32 dev boards (`BLINK_GPIO`) |
+| Signal       | GPIO | Direction | Notes                                                          |
+|--------------|------|-----------|----------------------------------------------------------------|
+| On-board LED | `2`  | Output    | Default integrated LED on most ESP32 dev boards (`BLINK_GPIO`)  |
+| BOOT button  | `0`  | Input (pull-up) | On-board BOOT button, active LOW; triggers the send (sender only, `BUTTON_GPIO`) |
 
 ---
 
@@ -134,9 +138,9 @@ idf.py -p /dev/ttyUSB0 flash monitor
 **Expected output**
 
 ```
-# Sender
-ESPNOW_TEST: Starting as SENDER. Toggling LED command every 2 seconds...
-ESPNOW_TEST: Sending command: Turn LED ON
+# Sender  (each line below appears once per button press)
+ESPNOW_TEST: Starting as SENDER. Press the button to toggle/send the LED command...
+ESPNOW_TEST: Button pressed. Sending command: Turn LED ON
 ESPNOW_TEST: Last Packet Send Status: Delivery Success
 
 # Receiver
@@ -144,7 +148,7 @@ ESPNOW_TEST: Starting as RECEIVER. Waiting for LED commands...
 ESPNOW_TEST: Received command: Turn LED ON
 ```
 
-When working, the receiver's LED toggles every 2 seconds in sync with the sender.
+When working, each press of the sender's BOOT button toggles the receiver's LED in sync.
 
 > **Toolchain note:** developed and tested on **ESP-IDF v6.0**. The callback signatures used (`esp_now_send_info_t`, `esp_now_recv_info_t`) require ESP-IDF v5.4 or newer.
 
